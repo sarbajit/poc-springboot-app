@@ -22,11 +22,11 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
       # Project .mvn/settings.xml holds the Nexus mirror; it reads credentials from
       # NEXUS_USERNAME / NEXUS_PASSWORD (job env above).
@@ -34,8 +34,8 @@ jobs:
         run: |
           # Quote -D args: PowerShell splits unquoted -Dfoo.bar=... at the dot
           mvn -B -s .mvn/settings.xml clean deploy `
-            "-DaltReleaseDeploymentRepository=nexus-releases::http://$($env:NEXUS_HOST):8081/repository/maven-releases/" `
-            "-DaltSnapshotDeploymentRepository=nexus-snapshots::http://$($env:NEXUS_HOST):8081/repository/maven-snapshots/"
+            "-DaltReleaseDeploymentRepository=nexus-releases::http://$($env:NEXUS_HOST):8081/repository/maven-release/" `
+            "-DaltSnapshotDeploymentRepository=nexus-snapshots::http://$($env:NEXUS_HOST):8081/repository/maven-snapshot/"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # docker/login-action passes the password to docker directly (no PowerShell pipe).
