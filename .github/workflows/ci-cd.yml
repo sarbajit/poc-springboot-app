@@ -1,0 +1,68 @@
+name: Spring Boot CI - Nexus & GHCR
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: [self-hosted, springboot-runner]
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Configure Maven settings.xml for Nexus
+        run: |
+          mkdir -p ~/.m2
+          cat > ~/.m2/settings.xml <<EOF
+          <settings>
+            <servers>
+              <server>
+                <id>nexus-public</id>
+                <username>${{ secrets.NEXUS_USERNAME }}</username>
+                <password>${{ secrets.NEXUS_PASSWORD }}</password>
+              </server>
+              <server>
+                <id>nexus-releases</id>
+                <username>${{ secrets.NEXUS_USERNAME }}</username>
+                <password>${{ secrets.NEXUS_PASSWORD }}</password>
+              </server>
+              <server>
+                <id>nexus-snapshots</id>
+                <username>${{ secrets.NEXUS_USERNAME }}</username>
+                <password>${{ secrets.NEXUS_PASSWORD }}</password>
+              </server>
+            </servers>
+            <mirrors>
+              <mirror>
+                <id>nexus-public</id>
+                <mirrorOf>*</mirrorOf>
+                <url>http://${{ secrets.NEXUS_HOST }}:8081/repository/maven-public/</url>
+              </mirror>
+            </mirrors>
+          </settings>
+          EOF
+
+      - name: Build and deploy JAR to Nexus
+        run: |
+          mvn -B clean deploy \
+            -DaltDeploymentRepository=nexus-releases::default::http://${{ secrets.NEXUS_HOST }}:8081/repository/maven-releases/ \
+            -DaltSnapshotDeploymentRepository=nexus-snapshots::default::http://${{ secrets.NEXUS_HOST }}:8081/repository/maven-snapshots/
+
+      - name: Login to Nexus Docker and GHCR
+        run: |
+          echo "${{ secrets.NEXUS_PASSWORD }}" | docker login http://${{ secrets.NEXUS_HOST }}:8083 -u "${{ secrets.NEXUS_USERNAME }}" --password-stdin
+          echo "${{ secrets.NEXUS_PASSWORD }}" | docker login http://${{ secrets.NEXUS_HOST }}:8082 -u "${{ secrets.NEXUS_USERNAME }}" --password-stdin
+          echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
+
+      - name: Build and push image to Nexus and GHCR
+        run: |
+          IMAGE_TAG="${{ github.sha }}"
+          docker build \
+            --build-arg NEXUS_HOST="${{ secrets.NEXUS_HOST }}" \
+            -t "${{ secrets.NEXUS_HOST }}:8082/springboot-poc:${IMAGE_TAG}" \
+            -t "ghcr.io/${{ github.repository_owner }}/springboot-poc:${IMAGE_TAG}" \
+            .
+          docker push "${{ secrets.NEXUS_HOST }}:8082/springboot-poc:${IMAGE_TAG}"
+          docker push "ghcr.io/${{ github.repository_owner }}/springboot-poc:${IMAGE_TAG}"
