@@ -8,61 +8,72 @@ on:
 jobs:
   build-and-push:
     runs-on: [self-hosted, springboot-runner]
+    # Runner is Windows: default shell for `run:` is PowerShell, so all scripts below are PowerShell.
+    defaults:
+      run:
+        shell: powershell
+    env:
+      # Pass secrets as env vars instead of inlining ${{ }} into scripts, so characters
+      # like $ ` " in a password are not interpreted by PowerShell.
+      NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
+      NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+      NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Configure Maven settings.xml for Nexus
-        run: |
-          mkdir -p ~/.m2
-          cat > ~/.m2/settings.xml <<EOF
-          <settings>
-            <servers>
-              <server>
-                <id>nexus-public</id>
-                <username>${{ secrets.NEXUS_USERNAME }}</username>
-                <password>${{ secrets.NEXUS_PASSWORD }}</password>
-              </server>
-              <server>
-                <id>nexus-releases</id>
-                <username>${{ secrets.NEXUS_USERNAME }}</username>
-                <password>${{ secrets.NEXUS_PASSWORD }}</password>
-              </server>
-              <server>
-                <id>nexus-snapshots</id>
-                <username>${{ secrets.NEXUS_USERNAME }}</username>
-                <password>${{ secrets.NEXUS_PASSWORD }}</password>
-              </server>
-            </servers>
-            <mirrors>
-              <mirror>
-                <id>nexus-public</id>
-                <mirrorOf>*</mirrorOf>
-                <url>http://${{ secrets.NEXUS_HOST }}:8081/repository/maven-public/</url>
-              </mirror>
-            </mirrors>
-          </settings>
-          EOF
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
 
+      # Project .mvn/settings.xml holds the Nexus mirror; it reads credentials from
+      # NEXUS_USERNAME / NEXUS_PASSWORD (job env above).
       - name: Build and deploy JAR to Nexus
         run: |
-          mvn -B clean deploy \
-            -DaltDeploymentRepository=nexus-releases::default::http://${{ secrets.NEXUS_HOST }}:8081/repository/maven-releases/ \
-            -DaltSnapshotDeploymentRepository=nexus-snapshots::default::http://${{ secrets.NEXUS_HOST }}:8081/repository/maven-snapshots/
+          # Quote -D args: PowerShell splits unquoted -Dfoo.bar=... at the dot
+          mvn -B -s .mvn/settings.xml clean deploy `
+            "-DaltReleaseDeploymentRepository=nexus-releases::http://$($env:NEXUS_HOST):8081/repository/maven-releases/" `
+            "-DaltSnapshotDeploymentRepository=nexus-snapshots::http://$($env:NEXUS_HOST):8081/repository/maven-snapshots/"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Login to Nexus Docker and GHCR
-        run: |
-          echo "${{ secrets.NEXUS_PASSWORD }}" | docker login http://${{ secrets.NEXUS_HOST }}:8083 -u "${{ secrets.NEXUS_USERNAME }}" --password-stdin
-          echo "${{ secrets.NEXUS_PASSWORD }}" | docker login http://${{ secrets.NEXUS_HOST }}:8082 -u "${{ secrets.NEXUS_USERNAME }}" --password-stdin
-          echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
+      # docker/login-action passes the password to docker directly (no PowerShell pipe).
+      # Registry = host:port, no http:// prefix.
+      - name: Login to Nexus Docker (pull - docker-group 8083)
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.NEXUS_HOST }}:8083
+          username: ${{ secrets.NEXUS_USERNAME }}
+          password: ${{ secrets.NEXUS_PASSWORD }}
 
-      - name: Build and push image to Nexus and GHCR
+      - name: Login to Nexus Docker (push - docker-hosted 8082)
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.NEXUS_HOST }}:8082
+          username: ${{ secrets.NEXUS_USERNAME }}
+          password: ${{ secrets.NEXUS_PASSWORD }}
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ secrets.GHCR_USERNAME }}
+          password: ${{ secrets.GHCR_TOKEN }}
+
+      - name: Build and push image to Nexus and GHCR (WINDOWS)
         run: |
-          IMAGE_TAG="${{ github.sha }}"
-          docker build \
-            --build-arg NEXUS_HOST="${{ secrets.NEXUS_HOST }}" \
-            -t "${{ secrets.NEXUS_HOST }}:8082/springboot-poc:${IMAGE_TAG}" \
-            -t "ghcr.io/${{ github.repository_owner }}/springboot-poc:${IMAGE_TAG}" \
-            .
-          docker push "${{ secrets.NEXUS_HOST }}:8082/springboot-poc:${IMAGE_TAG}"
-          docker push "ghcr.io/${{ github.repository_owner }}/springboot-poc:${IMAGE_TAG}"
+          $ErrorActionPreference = 'Stop'
+          $tag        = "${{ github.sha }}"
+          $owner      = "${{ github.repository_owner }}".ToLower()   # GHCR requires lowercase
+          $nexusImage = "$($env:NEXUS_HOST):8082/springboot-poc:$tag"
+          $ghcrImage  = "ghcr.io/$owner/springboot-poc:$tag"
+
+          docker build --build-arg "NEXUS_HOST=$env:NEXUS_HOST" -t $nexusImage -t $ghcrImage .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          docker push $nexusImage
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          docker push $ghcrImage
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
