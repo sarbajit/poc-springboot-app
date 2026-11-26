@@ -2,7 +2,7 @@ name: Spring Boot CI - Nexus & GHCR
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "master" ]
   workflow_dispatch:
 
 jobs:
